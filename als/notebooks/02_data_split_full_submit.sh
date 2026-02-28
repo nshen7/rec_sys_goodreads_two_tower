@@ -16,7 +16,7 @@ set -euo pipefail
 PROJECT_ID="project-42495fb5-90f0-4a7f-bf3"          # <-- REPLACE with your GCP project ID
 REGION="us-central1"
 BUCKET="nshen7-personal-bucket"
-SCRIPT_LOCAL="/home/s38976581_gmail_com/projects/rec_sys_goodreads/notebooks/02_data_split_full.py"
+SCRIPT_LOCAL="/home/s38976581_gmail_com/projects/rec_sys_goodreads/als/notebooks/02_data_split_full.py"
 SCRIPT_GCS="gs://${BUCKET}/projects/rec_sys_goodreads/notebooks/02_data_split_full.py"
 BATCH_ID="goodreads-data-split-$(date +%Y%m%d-%H%M%S)"
 

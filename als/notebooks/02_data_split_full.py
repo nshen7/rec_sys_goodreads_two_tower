@@ -11,9 +11,15 @@ Submits via:
         --properties="spark.driver.memory=4g,spark.executor.memory=4g,spark.sql.legacy.timeParserPolicy=LEGACY"
 """
 
-from pyspark.sql import SparkSession
+from pyspark.sql import SparkSession, Window
 import pyspark.sql.functions as F
-from datetime import datetime
+
+# ===================================================================
+# Configuration
+# ===================================================================
+SAMPLE_PCT = 20.0  # Percentage of users to randomly sample (all their interactions are kept)
+MIN_USER_INTERACTIONS = 5
+MIN_BOOK_INTERACTIONS = 5
 
 # --- Spark session (Dataproc handles GCS connector, Java, auth) ---
 spark = (
@@ -25,7 +31,10 @@ spark = (
 
 GCS_BASE = "gs://nshen7-personal-bucket/projects/rec_sys_goodreads"
 PARQUET_BASE = f"{GCS_BASE}/data/parquet"
-OUTPUT_BASE = f"{GCS_BASE}/data/splits"
+OUTPUT_BASE = f"{GCS_BASE}/data/splits_sample_{int(SAMPLE_PCT)}pct"
+
+print(f"Configuration: Using {SAMPLE_PCT}% of users (all their interactions kept)")
+print(f"Output base: {OUTPUT_BASE}")
 
 # ===================================================================
 # 1. Load data — ALL interactions (every row = a shelved event)
@@ -106,11 +115,29 @@ df.select(
 ).show(truncate=False)
 
 # ===================================================================
-# 4. Iterative cold-start filtering
+# 4. Sample users and keep all their interactions (user-level sampling)
 # ===================================================================
-MIN_USER_INTERACTIONS = 5
-MIN_BOOK_INTERACTIONS = 5
+if SAMPLE_PCT < 100.0:
+    print(f"\nSampling {SAMPLE_PCT}% of users (keeping all their interactions)...")
+    sample_fraction = SAMPLE_PCT / 100.0
 
+    all_users = df.select("user_id").distinct()
+    total_users = all_users.count()
+    print(f"Total users before sampling: {total_users:,}")
+
+    sampled_users = all_users.sample(fraction=sample_fraction, seed=42)
+    sampled_user_count = sampled_users.count()
+    print(f"Sampled users: {sampled_user_count:,} ({sampled_user_count/total_users*100:.1f}%)")
+
+    df = df.join(F.broadcast(sampled_users), "user_id", "inner")
+    sampled_count = df.count()
+    print(f"Interactions after sampling: {sampled_count:,}")
+else:
+    print(f"\nUsing all interactions (SAMPLE_PCT = {SAMPLE_PCT}%)")
+
+# ===================================================================
+# 5. Iterative cold-start filtering
+# ===================================================================
 df_filtered = df.select("user_id", "book_id", "is_read", "rating", "date_added_ts")
 spark.sparkContext.setCheckpointDir(f"{GCS_BASE}/data/_checkpoints")
 
@@ -154,84 +181,72 @@ df_filtered = df_filtered.cache()
 df_filtered.count()
 
 # ===================================================================
-# 5. Temporal split: train (70%) / val (20%) / test (10%)
+# 6. Per-user temporal split: train (70%) / val (20%) / test (10%)
+#
+# For each user, rank their interactions by date_added_ts.
+# The last 10% (by rank) → test, the prior 20% → val, the rest → train.
+# Every user appears in all three splits.
 # ===================================================================
-cutoffs = df_filtered.select(
-    F.expr(
-        "percentile_approx(unix_timestamp(date_added_ts), array(0.7, 0.9))"
-    ).alias("cutoffs")
-).collect()[0]["cutoffs"]
-
-cutoff_val = datetime.fromtimestamp(cutoffs[0])
-cutoff_test = datetime.fromtimestamp(cutoffs[1])
-
-print(f"Train / Val boundary:  {cutoff_val}")
-print(f"Val / Test boundary:   {cutoff_test}")
-
-train = df_filtered.filter(F.col("date_added_ts") < F.lit(cutoff_val))
-val = df_filtered.filter(
-    (F.col("date_added_ts") >= F.lit(cutoff_val))
-    & (F.col("date_added_ts") < F.lit(cutoff_test))
+w = (
+    Window
+    .partitionBy("user_id")
+    .orderBy(F.col("date_added_ts").asc())
 )
-test = df_filtered.filter(F.col("date_added_ts") >= F.lit(cutoff_test))
+
+df_ranked = df_filtered.withColumn(
+    "rn", F.row_number().over(w)
+).withColumn(
+    "total", F.count("*").over(Window.partitionBy("user_id"))
+)
+
+# Compute per-row split boundaries
+# test:  last 10%  → rn > total * 0.90
+# val:   next 20%  → rn > total * 0.70 AND rn <= total * 0.90
+# train: first 70% → rn <= total * 0.70
+df_ranked = df_ranked.withColumn(
+    "split",
+    F.when(F.col("rn") > F.col("total") * 0.90, "test")
+     .when(F.col("rn") > F.col("total") * 0.70, "val")
+     .otherwise("train")
+)
+
+train = df_ranked.filter(F.col("split") == "train").drop("rn", "total", "split")
+val   = df_ranked.filter(F.col("split") == "val"  ).drop("rn", "total", "split")
+test  = df_ranked.filter(F.col("split") == "test" ).drop("rn", "total", "split")
 
 n_train = train.count()
-n_val = val.count()
-n_test = test.count()
-n_all = n_train + n_val + n_test
+n_val   = val.count()
+n_test  = test.count()
+n_all   = n_train + n_val + n_test
 
 print(f"Train: {n_train:,} ({n_train/n_all*100:.1f}%)")
 print(f"Val:   {n_val:,} ({n_val/n_all*100:.1f}%)")
 print(f"Test:  {n_test:,} ({n_test/n_all*100:.1f}%)")
 
 # ===================================================================
-# 6. Post-split filtering (remove unseen users/books from val/test)
-# ===================================================================
-train_users = train.select("user_id").distinct()
-train_books = train.select("book_id").distinct()
-
-val = (
-    val
-    .join(train_users, "user_id", "inner")
-    .join(train_books, "book_id", "inner")
-)
-n_val_filtered = val.count()
-print(f"Val after post-split filtering: {n_val_filtered:,}")
-
-test = (
-    test
-    .join(train_users, "user_id", "inner")
-    .join(train_books, "book_id", "inner")
-)
-n_test_filtered = test.count()
-print(f"Test after post-split filtering: {n_test_filtered:,}")
-
-# ===================================================================
 # 7. Validation checks
 # ===================================================================
-train_max = train.select(F.max("date_added_ts")).collect()[0][0]
-val_min = val.select(F.min("date_added_ts")).collect()[0][0]
-val_max = val.select(F.max("date_added_ts")).collect()[0][0]
-test_min = test.select(F.min("date_added_ts")).collect()[0][0]
+# Every user in val/test must be in train (guaranteed by construction,
+# but verify that no user ended up with zero train interactions).
+train_users = train.select("user_id").distinct()
+val_only_users   = val.select("user_id").distinct().subtract(train_users)
+test_only_users  = test.select("user_id").distinct().subtract(train_users)
 
-print(f"Train max:  {train_max}")
-print(f"Val min:    {val_min}")
-print(f"Val max:    {val_max}")
-print(f"Test min:   {test_min}")
-
-assert train_max <= cutoff_val, "LEAKAGE: train dates after val cutoff!"
-assert val_max <= cutoff_test, "LEAKAGE: val dates after test cutoff!"
-print("No temporal leakage detected.")
+n_val_cold  = val_only_users.count()
+n_test_cold = test_only_users.count()
+assert n_val_cold  == 0, f"{n_val_cold} users in val have no train interactions!"
+assert n_test_cold == 0, f"{n_test_cold} users in test have no train interactions!"
+print("All val/test users have training history — no cold-start leakage.")
 
 train_users_n = train.select("user_id").distinct().count()
 train_books_n = train.select("book_id").distinct().count()
-val_users_n = val.select("user_id").distinct().count()
-val_books_n = val.select("book_id").distinct().count()
-test_users_n = test.select("user_id").distinct().count()
-test_books_n = test.select("book_id").distinct().count()
+val_users_n   = val.select("user_id").distinct().count()
+val_books_n   = val.select("book_id").distinct().count()
+test_users_n  = test.select("user_id").distinct().count()
+test_books_n  = test.select("book_id").distinct().count()
 
 # ===================================================================
-# 8. Save to GCS
+# 9. Save to GCS
 # ===================================================================
 train_als = train.select(
     F.col("user_id").cast("int"),
@@ -264,9 +279,9 @@ test_check = spark.read.parquet(f"{OUTPUT_BASE}/test").count()
 print("=" * 60)
 print("  DATA SPLIT SUMMARY")
 print("=" * 60)
+print(f"Sample percentage:      {SAMPLE_PCT}% of users")
 print(f"Timestamp column:       date_added")
-print(f"Train/Val cutoff:       {cutoff_val}")
-print(f"Val/Test cutoff:        {cutoff_test}")
+print(f"Split strategy:         per-user temporal (train 70% / val 20% / test 10%)")
 print(f"Min user interactions:  {MIN_USER_INTERACTIONS}")
 print(f"Min book interactions:  {MIN_BOOK_INTERACTIONS}")
 print()

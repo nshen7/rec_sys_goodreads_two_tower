@@ -11,8 +11,8 @@ set -euo pipefail
 PROJECT_ID="project-42495fb5-90f0-4a7f-bf3"          # <-- REPLACE with your GCP project ID
 REGION="us-central1"
 BUCKET="nshen7-personal-bucket"
-SCRIPT_LOCAL="/home/s38976581_gmail_com/projects/rec_sys_goodreads/notebooks/03_fit_als_full.py"
-SCRIPT_GCS="gs://${BUCKET}/projects/rec_sys_goodreads/notebooks/03_fit_als_full.py"
+SCRIPT_LOCAL="/home/s38976581_gmail_com/projects/rec_sys_goodreads/als/notebooks/03_fit_als_full.py"
+SCRIPT_GCS="gs://${BUCKET}/projects/rec_sys_goodreads/baseline/notebooks/03_fit_als_full.py"
 BATCH_ID="goodreads-als-$(date +%Y%m%d-%H%M%S)"
 
 # ---- Pre-flight checks ----
@@ -44,11 +44,14 @@ gcloud dataproc batches submit pyspark "${SCRIPT_GCS}" \
     --batch="${BATCH_ID}" \
     --async \
     --properties="\
-spark.driver.memory=8g,\
+spark.driver.memory=16g,\
 spark.driver.memoryOverhead=4g,\
-spark.executor.memory=12g,\
+spark.executor.memory=16g,\
 spark.executor.memoryOverhead=6g,\
 spark.executor.cores=4,\
+spark.driver.maxResultSize=4g,\
+spark.executor.extraJavaOptions=-Xss4m,\
+spark.driver.extraJavaOptions=-Xss4m,\
 spark.sql.shuffle.partitions=800,\
 spark.default.parallelism=800,\
 spark.sql.adaptive.enabled=true,\

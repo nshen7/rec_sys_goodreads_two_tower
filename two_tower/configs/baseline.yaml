@@ -1,0 +1,94 @@
+# ─── Data paths ────────────────────────────────────────────────────────────────
+data:
+  train_path: "gs://nshen7-personal-bucket/projects/rec_sys_goodreads/data/two_tower_splits/train"
+  val_path:   "gs://nshen7-personal-bucket/projects/rec_sys_goodreads/data/two_tower_splits/val"
+  confirmed_negatives_path: "gs://nshen7-personal-bucket/projects/rec_sys_goodreads/data/two_tower_splits/confirmed_negatives"
+
+  # Artifact cache — built from train split on first run, reloaded on subsequent runs
+  artifacts_path: "artifacts/vocab_and_stats.pt"
+
+  # Memory-mapped dataset arrays — saved on first run, mmap'd on subsequent runs
+  mmap_dir: "artifacts/mmap"
+
+  # DataLoader
+  num_workers: 4
+  prefetch_factor: 2
+
+# ─── Vocabulary / cardinality ──────────────────────────────────────────────────
+# These are null here and populated at runtime from artifacts.
+# Listed for documentation purposes only.
+vocab:
+  num_users: null
+  num_items: null
+  num_authors: null
+  num_languages: null
+  num_formats: null
+  num_shelves: null
+
+# ─── Model architecture ────────────────────────────────────────────────────────
+model:
+  d_id: 128           # dim of user_id / item_id embeddings
+  d_cat: 32           # dim of each categorical feature embedding (author, language, format, shelf)
+  d_out: 256          # dim of final user_vec / item_vec output
+  normalize: true     # L2-normalize user_vec and item_vec before dot product
+
+  # MLP hidden layer sizes (same blueprint for both towers)
+  user_mlp_hidden: [512, 256]
+  item_mlp_hidden: [512, 256]
+
+  dropout: 0.1
+
+# ─── History ───────────────────────────────────────────────────────────────────
+history:
+  length: 10        # fixed; must match HISTORY_LENGTH from 01_data_prep.py
+  pad_item_id: 0    # must match PAD_ITEM_ID from 01_data_prep.py
+
+# ─── Numeric feature normalization ─────────────────────────────────────────────
+# Actual min/max/median are computed from training data and stored in artifacts.
+# declared_min/declared_max, when set, override data-derived bounds for stability.
+numeric:
+  book_avg_rating:
+    use_log1p: false
+    declared_min: 0.0
+    declared_max: 5.0
+  book_ratings_count:
+    use_log1p: true
+    declared_min: null
+    declared_max: null
+  book_num_pages:
+    use_log1p: true
+    declared_min: null
+    declared_max: null
+  book_publication_year:
+    use_log1p: false
+    declared_min: 1800.0
+    declared_max: 2020.0
+    fill_with_median: true   # null values filled with training-split median
+  book_is_ebook:
+    use_log1p: false
+    declared_min: 0.0
+    declared_max: 1.0
+
+# ─── Training ──────────────────────────────────────────────────────────────────
+training:
+  batch_size: 2048
+  epochs: 10
+  seed: 42
+
+  optimizer: adam
+  lr: 1.0e-3
+  weight_decay: 1.0e-5
+
+  # How sample_weight is transformed before multiplying per-sample loss
+  # Options: "raw" | "log1p" | "clip"
+  sample_weight_transform: "log1p"
+
+  # Temperature for InfoNCE softmax
+  temperature: 0.5
+
+  # Confirmed negatives: max items appended per batch from the per-user index
+  max_confirmed_neg_per_batch: 256
+
+  # Logging
+  log_every_n_steps: 100
+  checkpoint_dir: "checkpoints/"

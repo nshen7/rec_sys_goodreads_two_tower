@@ -9,7 +9,7 @@ Submits via:
     gcloud dataproc batches submit pyspark \
         gs://<BUCKET>/projects/rec_sys_goodreads/notebooks/03_fit_als_full.py \
         --region=us-central1 \
-        --properties="spark.driver.memory=8g,spark.executor.memory=8g,spark.executor.cores=4,spark.sql.legacy.timeParserPolicy=LEGACY"
+        --properties="spark.driver.memory=16g,spark.executor.memory=16g,spark.executor.cores=4,spark.sql.legacy.timeParserPolicy=LEGACY,spark.driver.maxResultSize=4g,spark.executor.extraJavaOptions=-Xss4m,spark.driver.extraJavaOptions=-Xss4m"
 """
 
 import time
@@ -19,6 +19,12 @@ from pyspark.sql import SparkSession, Window
 import pyspark.sql.functions as F
 from pyspark.ml.recommendation import ALS
 from pyspark.storagelevel import StorageLevel
+
+# ===================================================================
+# Configuration
+# ===================================================================
+SAMPLE_PCT = 20.0  # Must match the percentage used in 02_data_split_full.py
+K = 10
 
 # --- Spark session (Dataproc handles GCS connector, Java, auth) ---
 spark = (
@@ -34,16 +40,18 @@ def print(*args, **kwargs):
     _original_print(*args, **kwargs)
     _original_print(*args, **kwargs, file=output_buffer)
 
-GCS_BASE = "gs://nshen7-personal-bucket/projects/rec_sys_goodreads"
-SPLITS_BASE = f"{GCS_BASE}/data/splits"
-MODEL_BASE = f"{GCS_BASE}/models/als"
-OUTPUT_LOG = f"{GCS_BASE}/models/als/training_log.txt"
-
-K = 10
-
 # Redirect stdout to capture all print statements
 from io import StringIO
 output_buffer = StringIO()
+
+GCS_BASE = "gs://nshen7-personal-bucket/projects/rec_sys_goodreads"
+SPLITS_BASE = f"{GCS_BASE}/data/splits_sample_{int(SAMPLE_PCT)}pct"
+MODEL_BASE = f"{GCS_BASE}/models/als_sample_{int(SAMPLE_PCT)}pct"
+OUTPUT_LOG = f"{MODEL_BASE}/training_log.txt"
+
+print(f"Configuration: Using {SAMPLE_PCT}% sample data")
+print(f"Data path: {SPLITS_BASE}")
+print(f"Model output: {MODEL_BASE}")
 
 
 # ===================================================================
@@ -65,6 +73,9 @@ def evaluate_ranking(model, eval_df, beta, k=10):
 
     Ground truth: all (user, book) pairs in eval_df.
     NDCG uses graded relevance: r = 1 + 2*is_read + beta*max(0, rating-3).
+
+    FIX: Added materialization (.count() calls) to break down the logical plan
+    and prevent StackOverflowError in Spark's query planner.
     """
     cached = []
     try:
@@ -80,9 +91,10 @@ def evaluate_ranking(model, eval_df, beta, k=10):
         eval_with_r = compute_r(eval_df, beta)
         ground_truth_r = (
             eval_with_r.select("user_id", "book_id", "r")
-            .persist(StorageLevel.DISK_ONLY)
+            .persist(StorageLevel.MEMORY_AND_DISK)  # Changed from DISK_ONLY
         )
         cached.append(ground_truth_r)
+        ground_truth_r.count()  # Force materialization
 
         # Generate top-K recommendations
         recs = model.recommendForUserSubset(eval_users, k)
@@ -90,9 +102,10 @@ def evaluate_ranking(model, eval_df, beta, k=10):
             recs
             .select("user_id", F.posexplode("recommendations").alias("rec_rank", "rec"))
             .select("user_id", "rec_rank", F.col("rec.book_id").alias("rec_book_id"))
-            .persist(StorageLevel.DISK_ONLY)
+            .persist(StorageLevel.MEMORY_AND_DISK)  # Changed from DISK_ONLY
         )
         cached.append(recs_exploded)
+        recs_exploded.count()  # Force materialization
 
         # Hits: recommended items that appear in ground truth (with relevance score)
         hits = (
@@ -103,15 +116,26 @@ def evaluate_ranking(model, eval_df, beta, k=10):
                 "inner",
             )
             .select(recs_exploded["user_id"], "rec_book_id", "rec_rank", "r")
-            .persist(StorageLevel.DISK_ONLY)
+            .persist(StorageLevel.MEMORY_AND_DISK)  # Changed from DISK_ONLY
         )
         cached.append(hits)
+        hits.count()  # Force materialization
 
-        hits_per_user = hits.groupBy("user_id").agg(F.count("*").alias("n_hits"))
-
-        n_relevant_per_user = ground_truth_r.groupBy("user_id").agg(
-            F.count("*").alias("n_relevant")
+        hits_per_user = (
+            hits.groupBy("user_id")
+            .agg(F.count("*").alias("n_hits"))
+            .persist(StorageLevel.MEMORY_AND_DISK)  # Added caching
         )
+        cached.append(hits_per_user)
+        hits_per_user.count()  # Force materialization
+
+        n_relevant_per_user = (
+            ground_truth_r.groupBy("user_id")
+            .agg(F.count("*").alias("n_relevant"))
+            .persist(StorageLevel.MEMORY_AND_DISK)  # Added caching
+        )
+        cached.append(n_relevant_per_user)
+        n_relevant_per_user.count()  # Force materialization
 
         # --- Precision@K ---
         total_hits = hits_per_user.agg(F.sum("n_hits").alias("total_hits")).first()[0] or 0
@@ -125,7 +149,11 @@ def evaluate_ranking(model, eval_df, beta, k=10):
             .join(n_relevant_per_user, "user_id", "left")
             .fillna(1, subset=["n_relevant"])
             .withColumn("recall_at_k", F.col("n_hits") / F.col("n_relevant"))
+            .persist(StorageLevel.MEMORY_AND_DISK)  # Added caching
         )
+        cached.append(recall_per_user)
+        recall_per_user.count()  # Force materialization
+
         sum_recall = recall_per_user.agg(F.sum("recall_at_k").alias("sum_recall")).first()[0]
         avg_recall_at_k = sum_recall / n_eval_users
 
@@ -136,7 +164,10 @@ def evaluate_ranking(model, eval_df, beta, k=10):
             .withColumn("dcg_i", F.col("r") / F.log2(F.col("rec_rank") + 2))
             .groupBy("user_id")
             .agg(F.sum("dcg_i").alias("dcg"))
+            .persist(StorageLevel.MEMORY_AND_DISK)  # Added caching
         )
+        cached.append(dcg_per_user)
+        dcg_per_user.count()  # Force materialization
 
         # IDCG: sort each user's eval items by r descending, take top-K, sum r_i / log2(i+2)
         w_ideal = Window.partitionBy("user_id").orderBy(F.desc("r"))
@@ -147,7 +178,10 @@ def evaluate_ranking(model, eval_df, beta, k=10):
             .withColumn("idcg_i", F.col("r") / F.log2(F.col("ideal_rank") + 2))
             .groupBy("user_id")
             .agg(F.sum("idcg_i").alias("idcg"))
+            .persist(StorageLevel.MEMORY_AND_DISK)  # Added caching
         )
+        cached.append(ideal_ranking)
+        ideal_ranking.count()  # Force materialization
 
         ndcg_per_user = (
             eval_users
@@ -219,7 +253,9 @@ param_grid = {
 }
 
 results = []
-models = []  # Store all trained models
+best_model = None
+best_ndcg = -1.0
+
 combos = list(product(
     param_grid["rank"],
     param_grid["regParam"],
@@ -261,7 +297,27 @@ for i, (rank, reg, max_iter, beta) in enumerate(combos, 1):
         "elapsed_s": round(elapsed, 1),
     }
     results.append(result)
-    models.append(model)  # Save the trained model
+
+    # FIX: Only keep the best model, discard others to save memory
+    current_ndcg = metrics[f'ndcg@{K}']
+    if current_ndcg > best_ndcg:
+        # Unpersist old best model if it exists
+        if best_model is not None:
+            try:
+                best_model.userFactors.unpersist()
+                best_model.itemFactors.unpersist()
+            except:
+                pass
+        best_model = model
+        best_ndcg = current_ndcg
+    else:
+        # Unpersist this model since we won't use it
+        try:
+            model.userFactors.unpersist()
+            model.itemFactors.unpersist()
+        except:
+            pass
+
     print(f"NDCG@{K}={metrics[f'ndcg@{K}']:.4f}, "
           f"P@{K}={metrics[f'precision@{K}']:.4f} ({elapsed:.0f}s)")
 
@@ -270,14 +326,9 @@ print("\nGrid search complete.")
 # ===================================================================
 # 4. Best model selection
 # ===================================================================
-# Sort results and get best model by NDCG
-results_with_models = list(zip(results, models))
-results_with_models_sorted = sorted(results_with_models, key=lambda x: -x[0][f"ndcg@{K}"])
-best = results_with_models_sorted[0][0]
-best_model = results_with_models_sorted[0][1]  # Retrieve best model
-
-# Create sorted results list for display
-results_sorted = [r for r, _ in results_with_models_sorted]
+# Sort results by NDCG
+results_sorted = sorted(results, key=lambda x: -x[f"ndcg@{K}"])
+best = results_sorted[0]
 
 print(f"\n{'Rank':>6} {'RegParam':>10} {'MaxIter':>8} {'Beta':>6} "
       f"{'NDCG@10':>10} {'P@10':>8} {'R@10':>8}")
@@ -322,6 +373,9 @@ print()
 print("=" * 60)
 print("  IMPLICIT ALS MODEL SUMMARY")
 print("=" * 60)
+print(f"Configuration:")
+print(f"  Sample percentage: {SAMPLE_PCT}%")
+print()
 print(f"Data:")
 print(f"  Train:             {n_train:,} interactions")
 print(f"  Val:               {n_val:,} interactions")
