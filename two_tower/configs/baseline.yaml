@@ -11,7 +11,7 @@ data:
   mmap_dir: "artifacts/mmap"
 
   # DataLoader
-  num_workers: 4
+  num_workers: 2
   prefetch_factor: 2
 
 # ─── Vocabulary / cardinality ──────────────────────────────────────────────────
@@ -27,7 +27,7 @@ vocab:
 
 # ─── Model architecture ────────────────────────────────────────────────────────
 model:
-  d_id: 128           # dim of user_id / item_id embeddings
+  d_id: 256           # dim of user_id / item_id embeddings
   d_cat: 32           # dim of each categorical feature embedding (author, language, format, shelf)
   d_out: 256          # dim of final user_vec / item_vec output
   normalize: true     # L2-normalize user_vec and item_vec before dot product
@@ -72,11 +72,11 @@ numeric:
 # ─── Training ──────────────────────────────────────────────────────────────────
 training:
   batch_size: 2048
-  epochs: 10
+  epochs: 5
   seed: 42
 
   optimizer: adam
-  lr: 1.0e-3
+  lr: 1.0e-4
   weight_decay: 1.0e-5
 
   # How sample_weight is transformed before multiplying per-sample loss
@@ -84,7 +84,7 @@ training:
   sample_weight_transform: "log1p"
 
   # Temperature for InfoNCE softmax
-  temperature: 0.5
+  temperature: 0.8
 
   # Confirmed negatives: max items appended per batch from the per-user index
   max_confirmed_neg_per_batch: 256

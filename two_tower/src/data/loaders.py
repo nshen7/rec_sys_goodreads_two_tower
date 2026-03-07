@@ -505,8 +505,8 @@ class TwoTowerDataset(Dataset):
         return {
             "user_id": torch.tensor(self.user_ids[idx], dtype=torch.long),
             "target_item_id": torch.tensor(item_id, dtype=torch.long),
-            "history_item_ids": torch.from_numpy(self.history_item_ids[idx]).long(),
-            "history_item_weights": torch.from_numpy(self.history_item_weights[idx]),
+            "history_item_ids": torch.from_numpy(self.history_item_ids[idx].copy()).long(),
+            "history_item_weights": torch.from_numpy(self.history_item_weights[idx].copy()),
             "sample_weight": torch.tensor(self.sample_weights[idx], dtype=torch.float32),
             "target_cat_feats": self.item_cat_feats[item_id],   # LongTensor [6]
             "target_num_feats": self.item_num_feats[item_id],   # FloatTensor [5]

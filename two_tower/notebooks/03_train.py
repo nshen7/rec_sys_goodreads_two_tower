@@ -122,10 +122,6 @@ print(f"Experiment          : {EXPERIMENT_NAME}")
 CHECKPOINT_DIR = Path(cfg.training.checkpoint_dir) / EXPERIMENT_NAME
 CHECKPOINT_DIR.mkdir(parents=True, exist_ok=True)
 
-LOG_DIR = Path("logs") / EXPERIMENT_NAME
-LOG_DIR.mkdir(parents=True, exist_ok=True)
-
-
 def save_checkpoint(model, optimizer, epoch, val_loss, run_id):
     path = CHECKPOINT_DIR / f"epoch_{epoch:02d}_val{val_loss:.4f}.pt"
     torch.save(
@@ -172,12 +168,60 @@ def train_one_epoch(model, loader, optimizer, cfg, device, global_step, epoch):
         if global_step % log_every == 0:
             avg = log_loss / log_every
             mlflow.log_metric("train/loss_step", avg, step=global_step)
-            pbar.set_postfix({"step_loss": f"{avg:.4f}", "step": global_step})
+
+            with torch.no_grad():
+                scores_raw = user_vecs @ item_vecs.T  # raw cosine, no temperature
+                B = user_vecs.size(0)
+                pos_scores = scores_raw[torch.arange(B, device=device), torch.arange(B, device=device)]
+                neg_mask = ~torch.eye(B, dtype=torch.bool, device=device)
+                neg_scores = scores_raw[:, :B][neg_mask]
+                gap = pos_scores.mean().item() - neg_scores.mean().item()
+            mlflow.log_metric("train/pos_neg_gap_step", gap, step=global_step)
+
+            pbar.set_postfix({"loss": f"{avg:.4f}", "gap": f"{gap:.4f}", "step": global_step})
             print(
-                f"  [epoch {epoch} | step {global_step} | batch {step+1}/{n_batches}]  loss={avg:.4f}",
+                f"  [epoch {epoch} | step {global_step} | batch {step+1}/{n_batches}]"
+                f"  loss={avg:.4f}  gap={gap:.4f}",
                 flush=True,
             )
             log_loss = 0.0
+
+            # ── Gradient / activation diagnostics (epoch 1, first log step only) ──
+            if epoch == 1 and global_step == log_every:
+                with torch.no_grad():
+                    # 1. Embedding gradient norms — only rows seen in this batch
+                    #    (table-wide mean is ~0 because 99%+ of rows have zero grad)
+                    uid_grad = model.user_id_embedding.embedding.weight.grad
+                    iid_grad = model.item_id_embedding.embedding.weight.grad
+                    if uid_grad is not None:
+                        uid_rows = uid_grad[batch["user_id"]].abs().mean()
+                        print(f"  [diag] user_id emb grad  mean|abs| (active rows): {uid_rows:.6f}", flush=True)
+                    else:
+                        print("  [diag] user_id emb grad: None", flush=True)
+                    if iid_grad is not None:
+                        iid_rows = iid_grad[batch["item_ids"]].abs().mean()
+                        print(f"  [diag] item_id emb grad  mean|abs| (active rows): {iid_rows:.6f}", flush=True)
+                    else:
+                        print("  [diag] item_id emb grad: None", flush=True)
+
+                    # 2. Score matrix stats — is there any variance to learn from?
+                    scores = user_vecs @ item_vecs.T / cfg.training.temperature
+                    print(f"  [diag] scores  mean={scores.mean():.4f}  std={scores.std():.4f}  min={scores.min():.4f}  max={scores.max():.4f}", flush=True)
+
+                    # 3. Output vector norms — are both towers actually normalizing?
+                    print(f"  [diag] user_vecs norm  mean={user_vecs.norm(dim=-1).mean():.4f}", flush=True)
+                    print(f"  [diag] item_vecs norm  mean={item_vecs.norm(dim=-1).mean():.4f}", flush=True)
+
+                    # 4. History sparsity — how many real (non-pad) history items per user?
+                    real_hist_len = (batch["history_item_weights"] > 0).sum(dim=1).float()
+                    print(f"  [diag] real history len  mean={real_hist_len.mean():.2f}  min={real_hist_len.min():.0f}  max={real_hist_len.max():.0f}", flush=True)
+
+                    # 5. Positive score vs mean negative score — is the model discriminating at all?
+                    B = user_vecs.size(0)
+                    pos_scores = scores[torch.arange(B, device=device), torch.arange(B, device=device)]
+                    neg_mask = ~torch.eye(B, dtype=torch.bool, device=device)
+                    neg_scores = scores[:, :B][neg_mask]
+                    print(f"  [diag] pos score  mean={pos_scores.mean():.4f}  |  neg score  mean={neg_scores.mean():.4f}", flush=True)
 
     return total_loss / len(loader), global_step
 
@@ -185,6 +229,8 @@ def train_one_epoch(model, loader, optimizer, cfg, device, global_step, epoch):
 def validate(model, loader, cfg, device):
     model.eval()
     total_loss = 0.0
+    total_pos_score = 0.0
+    total_neg_score = 0.0
     with torch.no_grad():
         for batch in tqdm(loader, desc="val", leave=False, file=sys.stdout):
             batch = {k: v.to(device, non_blocking=True) for k, v in batch.items()}
@@ -196,7 +242,19 @@ def validate(model, loader, cfg, device):
                 temperature=cfg.training.temperature,
             )
             total_loss += loss.item()
-    return total_loss / len(loader)
+
+            B = user_vecs.size(0)
+            scores = user_vecs @ item_vecs.T  # no temperature — raw cosine similarity
+            pos_scores = scores[torch.arange(B, device=device), torch.arange(B, device=device)]
+            neg_mask = ~torch.eye(B, dtype=torch.bool, device=device)
+            neg_scores = scores[:, :B][neg_mask]
+            total_pos_score += pos_scores.mean().item()
+            total_neg_score += neg_scores.mean().item()
+
+    n = len(loader)
+    avg_pos = total_pos_score / n
+    avg_neg = total_neg_score / n
+    return total_loss / n, avg_pos, avg_neg
 
 
 # ── Training loop ─────────────────────────────────────────────────────────────
@@ -240,10 +298,14 @@ with mlflow.start_run() as run:
         mlflow.log_metric("train/loss_epoch", train_loss, step=epoch)
 
         val_start = time.time()
-        val_loss = validate(model, val_loader, cfg, DEVICE)
+        val_loss, val_pos, val_neg = validate(model, val_loader, cfg, DEVICE)
         val_elapsed = time.time() - val_start
-        print(f"  Val   loss: {val_loss:.4f}  ({val_elapsed:.0f}s)", flush=True)
+        val_gap = val_pos - val_neg
+        print(f"  Val   loss: {val_loss:.4f}  gap={val_gap:.4f} (pos={val_pos:.4f}, neg={val_neg:.4f})  ({val_elapsed:.0f}s)", flush=True)
         mlflow.log_metric("val/loss_epoch", val_loss, step=epoch)
+        mlflow.log_metric("val/pos_neg_gap", val_gap, step=epoch)
+        mlflow.log_metric("val/pos_score", val_pos, step=epoch)
+        mlflow.log_metric("val/neg_score", val_neg, step=epoch)
 
         total_elapsed = time.time() - train_start
         print(f"  Total elapsed: {total_elapsed/60:.1f} min", flush=True)

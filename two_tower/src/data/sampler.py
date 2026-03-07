@@ -77,7 +77,7 @@ class NumpyWeightedSampler(Sampler):
             replace=True,
             p=self._probs,
         )
-        return iter(indices.tolist())
+        return iter(indices)  # numpy iterator avoids copying to a Python list
 
 
 _MULTINOMIAL_LIMIT = 2 ** 24  # torch.multinomial hard limit
