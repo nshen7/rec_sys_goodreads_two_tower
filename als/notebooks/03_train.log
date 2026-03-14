@@ -1,0 +1,65 @@
+Configuration: Using 20.0% sample data
+Data path: gs://nshen7-personal-bucket/projects/rec_sys_goodreads/data/splits_sample_20pct
+Model output: gs://nshen7-personal-bucket/projects/rec_sys_goodreads/models/als_sample_20pct
+Train: 30,338,675 interactions
+Val:   8,692,184 interactions
+Test:  4,417,042 interactions
+
+Popularity baseline Precision@10: 0.0215
+26/02/25 03:09:17 WARN InstanceBuilder: Failed to load implementation from:dev.ludovic.netlib.blas.VectorBLAS
+[1/1] rank=50, regParam=0.1, maxIter=20, beta=0.5 ... NDCG@10=0.0195, P@10=0.0186 (2320s)
+
+Grid search complete.
+
+  Rank   RegParam  MaxIter   Beta    NDCG@10     P@10     R@10
+--------------------------------------------------------------
+    50      0.100       20    0.5     0.0195   0.0186   0.0195
+
+Best: rank=50, regParam=0.1, maxIter=20, beta=0.5
+Best Val NDCG@10: 0.0195
+
+Evaluating best model on test set...
+  Computing metrics for K=10...
+  Computing metrics for K=50...
+  Computing metrics for K=100...
+
+Model saved to: gs://nshen7-personal-bucket/projects/rec_sys_goodreads/models/als_sample_20pct/model
+Tuning results saved to: gs://nshen7-personal-bucket/projects/rec_sys_goodreads/models/als_sample_20pct/tuning_results
+
+============================================================
+  IMPLICIT ALS MODEL SUMMARY
+============================================================
+Configuration:
+  Sample percentage: 20.0%
+
+Data:
+  Train:             30,338,675 interactions
+  Val:               8,692,184 interactions
+  Test:              4,417,042 interactions
+
+Best hyperparameters:
+  rank:              50
+  regParam:          0.1
+  maxIter:           20
+  beta:              0.5
+
+Interaction strength: r = 1 + 2*is_read + 0.5*max(0, rating-3)
+
+Validation metrics (K=10):
+  NDCG@10:           0.0195
+  Precision@10:      0.0186
+  Recall@10:         0.0195
+
+Test metrics:
+  K=10:
+    precision@10:  0.0061
+    recall@10:     0.0112
+    ndcg@10:       0.0082
+  K=50:
+    precision@50:  0.0073
+    recall@50:     0.0480
+    ndcg@50:       0.0214
+  K=100:
+    precision@100: 0.0074
+    recall@100:    0.0835
+    ndcg@100:      0.0322
