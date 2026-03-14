@@ -185,6 +185,15 @@ Maintain:
 
 ### 3.1 Embedding Modules
 
+**Baseline hyperparameters (implemented):**
+
+| Parameter | Value | Notes |
+|-----------|-------|-------|
+| `d_id` | 128 | User and item ID embedding dim |
+| `d_cat` | 32 | Each categorical feature embedding dim |
+| `d_out` | 256 | Final user_vec / item_vec output dim |
+| `dropout` | 0.1 | Applied in MLP layers |
+
 **ID embeddings:**
 - `user_id_embedding`: `Embedding(num_users + 1, d_id)` — index 0 reserved/unused
 - `item_id_embedding`: `Embedding(num_items + 1, d_id)` — index 0 = PAD token (masked in history pooling)
@@ -212,7 +221,7 @@ Inputs (column names from training samples / `item_features` table):
 - numeric feature vector (5 dims, normalized)
 
 Combine via:
-- concatenation → MLP → `item_vec` (dimension d)
+- concatenation → MLP `[261 → 512 → 256 → d_out]` → `item_vec` (dimension d_out=256)
 
 (Optional) precomputed text embedding vector — skip in v1.
 
@@ -226,13 +235,13 @@ No explicit user feature vector in v1 (`user_stats` table is informational only)
 Steps:
 1. Look up `item_id_embedding` for all 10 history slots → shape [10, d_id]
 2. Weighted mean pooling using `history_item_weights` as weights; pad positions (`item_id == 0`) have weight 0.0 so masking is automatic → shape [d_id]
-3. Concatenate pooled_history + user_id_embedding → MLP → `user_vec` (dimension d)
+3. Concatenate pooled_history + user_id_embedding → MLP `[256 → 512 → 256 → d_out]` → `user_vec` (dimension d_out=256)
 
 Decision: history uses `item_id_embedding` directly in v1 (not full item tower output). Can be upgraded later.
 
 ### 3.4 Matching Function
 - Similarity = dot product between `user_vec` and `item_vec`
-- Apply L2-normalization optionally (toggle; recommended for training stability)
+- L2-normalization is **enabled by default** (`normalize: true` in config); with normalized vectors dot product = cosine similarity
 
 ### 3.5 Null / Sentinel Handling
 
@@ -257,21 +266,21 @@ Decision: history uses `item_id_embedding` directly in v1 (not full item tower o
 - Use cross-entropy style loss where the diagonal is the positive.
 
 ### 4.2 Incorporating Interaction Strength
-Use interaction_strength to influence training. Implement one (or more) of these options:
 
-Option A (recommended first): Weighted loss
-- Compute a per-sample weight from interaction_strength (e.g., log1p or clipped).
-- Multiply each sample’s loss by weight before averaging.
+**Implemented: Option B (weighted sampling)** via `WeightedRandomSampler`. The `sample_weight` column (`interaction_strength`) is transformed with `log1p` and used to oversample higher-strength interactions when constructing training batches. Option A (weighted loss) was considered but not implemented.
 
-Option B: Weighted sampling
-- Oversample higher-strength interactions when constructing training batches.
+Shelved-only interactions (strength=1.0) are included as positives with low weight.
 
-Option C: Both A + B
-- Start with A; add B only if needed.
+### 4.3 Training Hyperparameters (Baseline)
 
-Also decide whether “shelved-only” interactions are positives:
-- v1: include but with low weight (already encoded in interaction_strength)
-- alternative: filter out weakest interactions if too noisy
+| Parameter | Value | Notes |
+|-----------|-------|-------|
+| `batch_size` | 2048 | |
+| `optimizer` | Adam | `lr=1e-3`, `weight_decay=1e-5` |
+| `temperature` | 0.1 | InfoNCE softmax temperature; lower = sharper gradients. Tuned from 0.8 after observing loss plateau. |
+| `max_confirmed_neg_per_batch` | 1024 | Confirmed negatives appended to item set each batch |
+| `sample_weight_transform` | `log1p` | Applied to `sample_weight` before `WeightedRandomSampler` |
+| `epochs` | 3 | |
 
 ---
 

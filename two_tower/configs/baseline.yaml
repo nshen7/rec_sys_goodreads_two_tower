@@ -27,7 +27,7 @@ vocab:
 
 # ─── Model architecture ────────────────────────────────────────────────────────
 model:
-  d_id: 256           # dim of user_id / item_id embeddings
+  d_id: 128           # dim of user_id / item_id embeddings
   d_cat: 32           # dim of each categorical feature embedding (author, language, format, shelf)
   d_out: 256          # dim of final user_vec / item_vec output
   normalize: true     # L2-normalize user_vec and item_vec before dot product
@@ -71,12 +71,12 @@ numeric:
 
 # ─── Training ──────────────────────────────────────────────────────────────────
 training:
-  batch_size: 2048
-  epochs: 5
+  batch_size: 1536
+  epochs: 3
   seed: 42
 
   optimizer: adam
-  lr: 1.0e-4
+  lr: 1.0e-3
   weight_decay: 1.0e-5
 
   # How sample_weight is transformed before multiplying per-sample loss
@@ -84,10 +84,10 @@ training:
   sample_weight_transform: "log1p"
 
   # Temperature for InfoNCE softmax
-  temperature: 0.8
+  temperature: 0.1
 
   # Confirmed negatives: max items appended per batch from the per-user index
-  max_confirmed_neg_per_batch: 256
+  max_confirmed_neg_per_batch: 512
 
   # Logging
   log_every_n_steps: 100

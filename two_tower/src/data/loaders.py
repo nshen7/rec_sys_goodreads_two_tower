@@ -27,6 +27,7 @@ import torch
 from omegaconf import DictConfig
 from torch import Tensor
 from torch.utils.data import Dataset
+from tqdm.auto import tqdm
 
 
 # ── Constants ──────────────────────────────────────────────────────────────────
@@ -286,7 +287,7 @@ def build_item_feature_tensors(
     # Track which item_ids have been filled so we don't overwrite with a later duplicate
     seen_items = np.zeros(num_items + 1, dtype=bool)
 
-    for batch in item_batches:
+    for batch in tqdm(item_batches, desc="Building item feature tensors"):
         # Rename and select only needed columns, drop duplicate item_ids within batch
         items_df = (
             batch
