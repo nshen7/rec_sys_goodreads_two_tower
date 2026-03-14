@@ -71,8 +71,8 @@ numeric:
 
 # ─── Training ──────────────────────────────────────────────────────────────────
 training:
-  batch_size: 1536
-  epochs: 3
+  batch_size: 3072
+  epochs: 2
   seed: 42
 
   optimizer: adam
@@ -84,10 +84,10 @@ training:
   sample_weight_transform: "log1p"
 
   # Temperature for InfoNCE softmax
-  temperature: 0.1
+  temperature: 0.2
 
   # Confirmed negatives: max items appended per batch from the per-user index
-  max_confirmed_neg_per_batch: 512
+  max_confirmed_neg_per_batch: 2048
 
   # Logging
   log_every_n_steps: 100
